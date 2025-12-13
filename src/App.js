@@ -13,23 +13,29 @@ import {
   Calendar,
   Trash2,
   CheckCircle2,
-  AlertCircle,
   History,
   XCircle,
   RotateCcw,
-  AlertTriangle,
   Repeat,
-  CalendarDays,
+  // MoreVertical, // 移除未使用的图标引用
 } from "lucide-react";
 
 // --- 配置常量 ---
+// 修改图标为感叹号数量，直观代表重要性
 const IMPORTANCE_CONFIG = [
-  { value: 1, label: "琐事", icon: "💭" },
-  { value: 2, label: "一般", icon: "📝" },
-  { value: 3, label: "重要", icon: "⭐" },
+  { value: 1, label: "琐事", icon: "!" },
+  { value: 2, label: "一般", icon: "!!" },
+  { value: 3, label: "重要", icon: "!!!" },
 ];
 
-// --- 辅助函数：日期与优先级计算 ---
+// --- 辅助函数：触觉反馈 ---
+const triggerHaptic = (pattern = [15]) => {
+  if (navigator.vibrate) {
+    navigator.vibrate(pattern);
+  }
+};
+
+// --- 辅助函数：日期计算 ---
 const getDaysRemaining = (ddlString) => {
   if (!ddlString) return 999;
   const today = new Date();
@@ -40,27 +46,32 @@ const getDaysRemaining = (ddlString) => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
-// 根据 DDL 计算时间等级 (1-3)
-const calculateTimeLevel = (task) => {
-  if (task.isEveryday) return 2; // 每日任务默认时间权重为中等，但不参与 Hero 竞争
-
-  const days = getDaysRemaining(task.ddl);
-  if (days <= 3) return 3; // 3天内 = 紧急
-  if (days <= 7) return 2; // 7天内 = 一般
-  return 1; // >7天 = 琐事
-};
-
-// 格式化剩余时间文本
+// --- 辅助函数：精确倒计时 ---
 const formatTimeLeft = (task) => {
   if (task.isEveryday) return "每日任务";
+
   const days = getDaysRemaining(task.ddl);
+
+  if (days <= 1 && days >= 0) {
+    const now = new Date();
+    const timeStr = task.time || "23:59";
+    const target = new Date(`${task.ddl}T${timeStr}`);
+    const diff = target - now;
+
+    if (diff < 0) return "已逾期";
+
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    return `${hours}小时 ${minutes}分`;
+  }
+
   if (days < 0) return `已逾期 ${Math.abs(days)} 天`;
   if (days === 0) return "今天截止";
   if (days === 1) return "明天截止";
   return `${days} 天后截止`;
 };
 
-// --- Hook: 长按检测 ---
+// --- Hook: 增强版长按检测 (含防误触逻辑) ---
 const useLongPress = (
   onLongPress,
   onClick,
@@ -68,25 +79,56 @@ const useLongPress = (
 ) => {
   const timerRef = useRef();
   const isLongPress = useRef(false);
+  const startPos = useRef({ x: 0, y: 0 }); // 记录起始坐标
+  const isScrolling = useRef(false); // 标记是否发生了滚动
 
   const start = useCallback(
     (event) => {
-      if (shouldPreventDefault && event.target) {
-        // event.target.addEventListener('touchend', preventDefault, { passive: false });
-      }
+      // 记录触摸/点击的起始位置
+      const point = event.touches ? event.touches[0] : event;
+      startPos.current = { x: point.clientX, y: point.clientY };
+      isScrolling.current = false;
       isLongPress.current = false;
+
       timerRef.current = setTimeout(() => {
-        isLongPress.current = true;
-        onLongPress(event);
+        // 只有在没有发生滚动的情况下才触发长按
+        if (!isScrolling.current) {
+          isLongPress.current = true;
+          onLongPress(event);
+        }
       }, delay);
     },
-    [onLongPress, delay, shouldPreventDefault]
+    [onLongPress, delay]
   );
+
+  // 新增：移动检测函数
+  const move = useCallback((event) => {
+    if (isLongPress.current) return;
+
+    const point = event.touches ? event.touches[0] : event;
+    const moveX = Math.abs(point.clientX - startPos.current.x);
+    const moveY = Math.abs(point.clientY - startPos.current.y);
+
+    // 如果移动超过 10px，认为用户在滑动/滚动，取消长按和点击资格
+    if (moveX > 10 || moveY > 10) {
+      isScrolling.current = true;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    }
+  }, []);
 
   const clear = useCallback(
     (event, shouldTriggerClick = true) => {
       if (timerRef.current) clearTimeout(timerRef.current);
-      if (shouldTriggerClick && !isLongPress.current && onClick) {
+      // 触发点击的条件：
+      // 1. 需要触发点击
+      // 2. 不是长按
+      // 3. 并且没有发生明显的滑动 (isScrolling.current 为 false)
+      if (
+        shouldTriggerClick &&
+        !isLongPress.current &&
+        !isScrolling.current &&
+        onClick
+      ) {
         onClick(event);
       }
     },
@@ -94,35 +136,92 @@ const useLongPress = (
   );
 
   return {
-    onMouseDown: (e) => start(e),
-    onTouchStart: (e) => start(e),
+    onMouseDown: start,
+    onTouchStart: start,
+    onMouseMove: move, // 监听鼠标移动
+    onTouchMove: move, // 监听触摸移动 (关键)
     onMouseUp: (e) => clear(e),
     onMouseLeave: (e) => clear(e, false),
     onTouchEnd: (e) => clear(e),
   };
 };
 
-// --- 样式逻辑 ---
-const getCardStyle = (score, type) => {
-  // type: 'ddl-urgent' | 'daily' | 'normal'
-  if (type === "ddl-urgent")
-    return "bg-rose-50 text-rose-900 border border-rose-200 shadow-rose-100";
-  if (type === "daily")
-    return "bg-emerald-50 text-emerald-900 border border-emerald-200"; // 每日任务用清新的绿色
-
-  if (score >= 5)
-    return "bg-orange-50 text-orange-900 border border-orange-100";
-  if (score === 4) return "bg-amber-50 text-amber-900 border border-amber-100";
-  return "bg-slate-50 text-slate-800 border border-slate-200";
+// --- 主题配置系统 ---
+const THEMES = {
+  red: {
+    // DDL
+    topBar: "bg-rose-700",
+    main: "bg-rose-500",
+    iconColor: "text-rose-600",
+    watermarkColor: "text-rose-700",
+  },
+  green: {
+    // Everyday
+    topBar: "bg-emerald-700",
+    main: "bg-emerald-500",
+    iconColor: "text-emerald-600",
+    watermarkColor: "text-emerald-700",
+  },
+  purple: {
+    // Level 3
+    topBar: "bg-purple-800",
+    main: "bg-purple-600",
+    iconColor: "text-purple-600",
+    watermarkColor: "text-purple-800",
+  },
+  amber: {
+    // Level 2
+    topBar: "bg-orange-700",
+    main: "bg-orange-500",
+    iconColor: "text-orange-500",
+    watermarkColor: "text-orange-700",
+  },
+  blue: {
+    // Level 1
+    topBar: "bg-blue-700",
+    main: "bg-blue-500",
+    iconColor: "text-blue-600",
+    watermarkColor: "text-blue-700",
+  },
 };
 
-const getHeroCardStyle = (score) => {
-  // Hero 卡片只会出现 DDL 任务
-  if (score >= 5)
-    return "bg-gradient-to-br from-rose-600 to-red-700 text-white shadow-rose-200";
-  if (score === 4)
-    return "bg-gradient-to-br from-orange-500 to-orange-700 text-white shadow-orange-200";
-  return "bg-gradient-to-br from-blue-500 to-blue-700 text-white shadow-blue-200";
+// --- 样式逻辑：获取对应的主题对象 ---
+const getTheme = (task, sortMode) => {
+  if (task.isEveryday) return THEMES.green;
+
+  const days = getDaysRemaining(task.ddl);
+
+  if (days <= 1) return THEMES.red;
+
+  if (sortMode === "time") {
+    if (days <= 3) return THEMES.purple;
+    if (days <= 7) return THEMES.amber;
+    return THEMES.blue;
+  }
+
+  if (sortMode === "importance") {
+    switch (task.importanceLevel) {
+      case 3:
+        return THEMES.purple;
+      case 2:
+        return THEMES.amber;
+      default:
+        return THEMES.blue;
+    }
+  }
+
+  return THEMES.blue;
+};
+
+const getLevelColorClass = (levelValue) => {
+  switch (levelValue) {
+    case 3:
+      return "text-violet-500";
+    case 2:
+      return "text-amber-500";
+    default:
+      return "text-blue-500";
+  }
 };
 
 export default function SmartReminderApp() {
@@ -132,7 +231,53 @@ export default function SmartReminderApp() {
   const [editingTask, setEditingTask] = useState(null);
   const [installPrompt, setInstallPrompt] = useState(null);
 
-  // 初始化
+  const [sortMode, setSortMode] = useState("time");
+  const [isVisible, setIsVisible] = useState(true);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTasks((prev) => [...prev]);
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const handleSortChange = (newMode) => {
+    if (sortMode === newMode || !isVisible) return;
+    setIsVisible(false);
+    setTimeout(() => {
+      triggerHaptic([10]);
+      setSortMode(newMode);
+      setIsVisible(true);
+    }, 500);
+  };
+
+  useEffect(() => {
+    const handlePopState = (event) => {
+      setView((currentView) => {
+        if (currentView !== "dashboard") return "dashboard";
+        return currentView;
+      });
+      setEditingTask(null);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateTo = (newView) => {
+    setView(newView);
+    window.history.pushState({ view: newView }, null, "");
+  };
+
+  const goBack = () => {
+    window.history.back();
+  };
+
   useEffect(() => {
     const savedTasks = localStorage.getItem("smart-reminder-data");
     const savedHistory = localStorage.getItem("smart-reminder-history");
@@ -145,67 +290,88 @@ export default function SmartReminderApp() {
     });
   }, []);
 
-  // 持久化
   useEffect(() => {
     localStorage.setItem("smart-reminder-data", JSON.stringify(tasks));
     localStorage.setItem("smart-reminder-history", JSON.stringify(history));
   }, [tasks, history]);
 
-  // --- 核心逻辑：筛选与排序 ---
-  const { topTask, otherTasks } = useMemo(() => {
+  const { heroTasks, gridTasks } = useMemo(() => {
     const todayStr = new Date().toDateString();
-
-    // 1. 预处理：过滤掉“今天已完成的每日任务”
     const activeTasks = tasks.filter((task) => {
       if (task.isEveryday && task.lastCompletedAt) {
         const completedDate = new Date(task.lastCompletedAt).toDateString();
-        if (completedDate === todayStr) return false; // 今天做过了，隐藏
+        if (completedDate === todayStr) return false;
       }
       return true;
     });
 
-    // 2. 计算动态分数并排序
-    const sorted = [...activeTasks]
-      .map((task) => {
-        const timeLevel = calculateTimeLevel(task);
-        return {
-          ...task,
-          _score: timeLevel + task.importanceLevel,
-          _timeLevel: timeLevel,
-        };
-      })
-      .sort((a, b) => {
-        // 优先级1: 分数高低
-        if (b._score !== a._score) return b._score - a._score;
-        // 优先级2: DDL 近的在前 (每日任务没有 DDL，视为最远)
-        const daysA = a.isEveryday ? 999 : getDaysRemaining(a.ddl);
-        const daysB = b.isEveryday ? 999 : getDaysRemaining(b.ddl);
-        if (daysA !== daysB) return daysA - daysB;
-        // 优先级3: 创建时间
-        return new Date(b.createdAt) - new Date(a.createdAt);
-      });
+    const sorted = [...activeTasks].sort((a, b) => {
+      const daysA = a.isEveryday ? 999 : getDaysRemaining(a.ddl);
+      const daysB = b.isEveryday ? 999 : getDaysRemaining(b.ddl);
 
-    // 3. 挑选 Hero Task (每日任务不参与 Hero)
-    let hero = null;
+      const isDDLA = !a.isEveryday && daysA <= 1;
+      const isDDLB = !b.isEveryday && daysB <= 1;
+
+      if (isDDLA && !isDDLB) return -1;
+      if (!isDDLA && isDDLB) return 1;
+
+      if (isDDLA && isDDLB) {
+        const timeA = new Date(`${a.ddl}T${a.time || "23:59"}`).getTime();
+        const timeB = new Date(`${b.ddl}T${b.time || "23:59"}`).getTime();
+        if (timeA !== timeB) return timeA - timeB;
+        if (a.importanceLevel !== b.importanceLevel)
+          return b.importanceLevel - a.importanceLevel;
+        return new Date(b.createdAt) - new Date(a.createdAt);
+      }
+
+      const impA = a.importanceLevel;
+      const impB = b.importanceLevel;
+
+      if (sortMode === "time") {
+        if (daysA !== daysB) return daysA - daysB;
+        if (!a.isEveryday && !b.isEveryday) {
+          const timeA = new Date(`${a.ddl}T${a.time || "23:59"}`).getTime();
+          const timeB = new Date(`${b.ddl}T${b.time || "23:59"}`).getTime();
+          if (timeA !== timeB) return timeA - timeB;
+        }
+        if (impB !== impA) return impB - impA;
+      } else {
+        if (impB !== impA) return impB - impA;
+        if (daysA !== daysB) return daysA - daysB;
+        if (!a.isEveryday && !b.isEveryday) {
+          const timeA = new Date(`${a.ddl}T${a.time || "23:59"}`).getTime();
+          const timeB = new Date(`${b.ddl}T${b.time || "23:59"}`).getTime();
+          if (timeA !== timeB) return timeA - timeB;
+        }
+      }
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+    let heroes = [];
     let others = [];
 
-    // 找到第一个非 Everyday 的任务作为 Hero
-    const heroIndex = sorted.findIndex((t) => !t.isEveryday);
+    const ddlTasks = sorted.filter(
+      (t) => !t.isEveryday && getDaysRemaining(t.ddl) <= 1
+    );
 
-    if (heroIndex !== -1) {
-      hero = sorted[heroIndex];
-      others = [...sorted.slice(0, heroIndex), ...sorted.slice(heroIndex + 1)];
+    if (ddlTasks.length > 0) {
+      heroes = ddlTasks;
+      others = sorted.filter(
+        (t) => !(!t.isEveryday && getDaysRemaining(t.ddl) <= 1)
+      );
     } else {
-      others = sorted;
+      if (sorted.length > 0) {
+        heroes = [sorted[0]];
+        others = sorted.slice(1);
+      }
     }
 
-    return { topTask: hero, otherTasks: others };
-  }, [tasks]);
+    return { heroTasks: heroes, gridTasks: others };
+  }, [tasks, sortMode]);
 
-  // --- 操作逻辑 ---
   const completeTask = (task) => {
+    triggerHaptic([10, 50, 10]);
     if (task.isEveryday) {
-      // 每日任务：更新完成时间，不删除
       setTasks((prev) =>
         prev.map((t) =>
           t.id === task.id
@@ -213,7 +379,6 @@ export default function SmartReminderApp() {
             : t
         )
       );
-      // 可选：同时也加一条记录到历史，方便回顾
       setHistory((prev) => {
         const newHistory = [
           { ...task, completedAt: new Date().toISOString(), type: "daily_log" },
@@ -222,7 +387,6 @@ export default function SmartReminderApp() {
         return newHistory.slice(0, 20);
       });
     } else {
-      // 普通任务：删除并归档
       setTasks((prev) => prev.filter((t) => t.id !== task.id));
       setHistory((prev) => {
         const newHistory = [
@@ -236,20 +400,17 @@ export default function SmartReminderApp() {
 
   const restoreTask = (task) => {
     setHistory((prev) => prev.filter((t) => t.id !== task.id));
-    if (task.type === "daily_log") {
-      // 每日任务历史恢复其实没意义，这里主要是为了普通任务
-      return;
-    }
+    if (task.type === "daily_log") return;
     setTasks((prev) => [{ ...task, completedAt: undefined }, ...prev]);
+    showToast("任务已恢复");
   };
 
   const handleSave = (task) => {
-    // 校验
     if (!task.isEveryday && !task.ddl) {
-      alert("请设置截止日期，或者设为每日任务");
+      showToast("⚠️ 请设置截止日期，或设为每日任务");
       return;
     }
-
+    triggerHaptic([20]);
     if (task.id) {
       setTasks(tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t)));
     } else {
@@ -262,18 +423,15 @@ export default function SmartReminderApp() {
         ...tasks,
       ]);
     }
-    setView("dashboard");
-    setEditingTask(null);
+    goBack();
   };
 
   const handleDeletePermanent = (id) => {
-    if (window.confirm("彻底删除这条记录？")) {
-      setHistory((prev) => prev.filter((t) => t.id !== id));
-    }
+    triggerHaptic([10]);
+    setHistory((prev) => prev.filter((t) => t.id !== id));
   };
 
   const openEditor = (task = null) => {
-    // 默认明天截止，重要程度一般
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const defaultDDL = tomorrow.toISOString().split("T")[0];
@@ -284,22 +442,18 @@ export default function SmartReminderApp() {
         content: "",
         importanceLevel: 2,
         ddl: defaultDDL,
+        time: "",
         isEveryday: false,
       }
     );
-    setView("editor");
+    navigateTo("editor");
   };
 
-  // --- 组件：普通卡片 (支持 DDL 和 Everyday 水印) ---
+  // --- 组件：普通卡片 (极致压缩高度) ---
   const GridCard = ({ task }) => {
-    const isDDLUrgent = !task.isEveryday && getDaysRemaining(task.ddl) <= 1;
-    const cardType = task.isEveryday
-      ? "daily"
-      : isDDLUrgent
-      ? "ddl-urgent"
-      : "normal";
-    const styleClass = getCardStyle(task._score, cardType);
+    const theme = getTheme(task, sortMode);
     const [isShaking, setIsShaking] = useState(false);
+    const importanceConfig = IMPORTANCE_CONFIG[task.importanceLevel - 1];
 
     const handleLongPress = () => {
       setIsShaking(true);
@@ -315,71 +469,74 @@ export default function SmartReminderApp() {
       <div
         {...pressHandlers}
         className={`
-          relative flex flex-col p-4 rounded-2xl shadow-sm active:scale-95 transition-all cursor-pointer aspect-[4/3] select-none overflow-hidden
-          ${styleClass}
-          ${isShaking ? "animate-shake ring-2 ring-offset-2 ring-current" : ""}
+          flex flex-col rounded-xl overflow-hidden shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1),0_2px_4px_-1px_rgba(0,0,0,0.06)] bg-white relative group cursor-pointer 
+          min-h-[130px] 
+          transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_10px_15px_-3px_rgba(0,0,0,0.1),0_4px_6px_-2px_rgba(0,0,0,0.05)]
+          ${isShaking ? "animate-shake" : ""}
         `}
         style={{ WebkitTouchCallout: "none" }}
       >
-        {/* 水印区域 */}
-        {isDDLUrgent && (
-          <div className="absolute -right-2 -top-2 w-20 h-20 opacity-10 pointer-events-none rotate-12 z-0">
-            <span className="font-black text-5xl text-red-900 block pt-2 pl-2 border-4 border-red-900 rounded-lg -rotate-12">
-              DDL
-            </span>
-          </div>
-        )}
-        {task.isEveryday && (
-          <div className="absolute -right-4 -top-3 w-24 h-24 opacity-10 pointer-events-none z-0">
-            <Repeat className="w-full h-full text-emerald-900" />
-          </div>
-        )}
+        {/* 1. 顶部深色条 */}
+        <div className={`h-1.5 w-full ${theme.topBar} shrink-0`}></div>
 
-        {/* 顶部元数据 */}
-        <div className="flex justify-between items-center mb-2 z-10 relative">
-          <span
-            className={`text-[10px] font-bold uppercase tracking-widest ${
-              isDDLUrgent ? "text-rose-600" : "text-gray-400"
-            }`}
-          >
-            {formatTimeLeft(task)}
-          </span>
-          <div className="flex gap-1 opacity-50 scale-75 origin-right">
-            {/* 既然时间是自动的，这里只显示重要程度图标 */}
-            <span>{IMPORTANCE_CONFIG[task.importanceLevel - 1].icon}</span>
+        {/* 2. 中间主色块 (更紧凑的 Padding) */}
+        <div
+          className={`flex-grow ${theme.main} px-3 pt-2 pb-5 flex flex-col relative text-white`}
+        >
+          <div className="flex justify-between items-center mb-0 opacity-60 h-2">
+            <div className="w-1 h-1 rounded-full bg-white/50"></div>
+          </div>
+
+          <div className="flex-1 flex flex-col justify-center items-center text-center z-10">
+            <h2 className="text-lg font-bold tracking-tight leading-tight drop-shadow-sm line-clamp-2 w-full break-words">
+              {task.title || "无标题"}
+            </h2>
+          </div>
+
+          {/* 悬浮按钮 (FAB) */}
+          <div className="absolute bottom-0 right-3 transform translate-y-1/2 z-20">
+            <button
+              className={`bg-white ${theme.iconColor} w-8 h-8 rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] ring-1 ring-black/5 flex items-center justify-center transition-all duration-200 active:scale-95 hover:shadow-lg`}
+            >
+              {/* 字体加粗以清晰显示感叹号 */}
+              <span className="text-base font-black leading-none flex items-center justify-center tracking-tighter">
+                {importanceConfig.icon}
+              </span>
+            </button>
           </div>
         </div>
 
-        {/* 内容预览 */}
-        <div className="flex-1 min-h-0 z-10 relative">
-          <p className="text-xs text-gray-500/80 leading-relaxed font-medium line-clamp-3">
-            {task.content || (
-              <span className="italic opacity-50">无详细备注...</span>
-            )}
-          </p>
-        </div>
-
-        {/* 标题 */}
-        <div className="mt-auto pt-2 z-10 relative">
-          <h3
-            className={`font-black leading-none tracking-tight line-clamp-2 ${
-              isDDLUrgent ? "text-rose-700" : "text-gray-800"
-            }`}
-            style={{ fontSize: "1.15rem" }}
-          >
-            {task.title || "无标题"}
-          </h3>
+        {/* 3. 底部白色内容区 */}
+        <div className="bg-white px-3 pt-5 pb-2 shrink-0">
+          <div className="flex gap-2">
+            <div className="mt-0.5 shrink-0">
+              <Clock className="w-3 h-3 text-gray-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              {/* 内容为空时不显示 */}
+              {task.content && (
+                <h3 className="text-gray-600 font-medium text-xs leading-snug mb-0.5 line-clamp-1">
+                  {task.content}
+                </h3>
+              )}
+              <p className="text-gray-400 text-[10px] font-bold uppercase tracking-wider">
+                {formatTimeLeft(task)}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     );
   };
 
-  // --- 组件：Hero 卡片 (Top 1) ---
+  // --- 组件：Hero 卡片 (极致压缩高度) ---
   const HeroCard = ({ task }) => {
-    // Hero 必定不是 Everyday
-    const isDDLUrgent = getDaysRemaining(task.ddl) <= 1;
-    const styleClass = getHeroCardStyle(task._score);
+    const theme = getTheme(task, sortMode);
     const [isShaking, setIsShaking] = useState(false);
+    const importanceConfig = IMPORTANCE_CONFIG[task.importanceLevel - 1];
+
+    const days = getDaysRemaining(task.ddl);
+    const isDDL = !task.isEveryday && days <= 1;
 
     const handleLongPress = () => {
       setIsShaking(true);
@@ -395,212 +552,220 @@ export default function SmartReminderApp() {
       <div
         {...pressHandlers}
         className={`
-          relative w-full rounded-3xl p-6 mb-8 shadow-2xl text-white overflow-hidden group select-none active:scale-[0.98] transition-transform
-          ${styleClass}
-          ${
-            isShaking
-              ? "animate-shake ring-4 ring-offset-4 ring-red-500/50"
-              : ""
-          }
+          flex flex-col rounded-2xl overflow-hidden shadow-2xl bg-white relative group cursor-pointer mb-4 transition-transform active:scale-[0.99]
+          ${isShaking ? "animate-shake" : ""}
         `}
         style={{ WebkitTouchCallout: "none" }}
       >
-        <div className="absolute -bottom-4 -right-4 p-4 opacity-10 rotate-12">
-          {isDDLUrgent ? (
-            <AlertTriangle className="w-56 h-56" />
-          ) : (
-            <Clock className="w-48 h-48" />
-          )}
+        {/* 1. 顶部深色条 */}
+        <div className={`h-2 w-full ${theme.topBar} shrink-0`}></div>
+
+        {/* 2. 中间主色块 */}
+        <div
+          className={`relative ${theme.main} px-5 pt-4 pb-8 flex flex-col text-white`}
+        >
+          {/* 背景水印 */}
+          <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-t-none">
+            <div
+              className={`absolute -bottom-4 -right-4 opacity-20 rotate-12 ${theme.watermarkColor}`}
+            >
+              {isDDL ? (
+                <span className="text-[90px] font-black leading-none tracking-tighter">
+                  DDL
+                </span>
+              ) : task.isEveryday ? (
+                <Repeat size={100} />
+              ) : (
+                <Calendar size={100} />
+              )}
+            </div>
+          </div>
+
+          <div className="flex justify-between items-center mb-2 opacity-80 z-10">
+            <div className="text-[10px] font-bold uppercase tracking-widest bg-black/10 px-2 py-0.5 rounded">
+              FOCUS NOW
+            </div>
+          </div>
+
+          <div className="flex-1 flex flex-col justify-center items-center text-center z-10 my-2">
+            <h2 className="text-2xl md:text-3xl font-black tracking-tight leading-tight drop-shadow-md w-full break-words">
+              {task.title || "无标题"}
+            </h2>
+          </div>
+
+          {/* 悬浮按钮 (FAB) */}
+          <div className="absolute bottom-0 right-6 transform translate-y-1/2 z-20">
+            <button
+              className={`bg-white ${theme.iconColor} w-14 h-14 rounded-full shadow-[0_8px_20px_rgba(0,0,0,0.2)] ring-1 ring-black/5 flex items-center justify-center hover:scale-105 active:scale-95 transition-all duration-300`}
+            >
+              <span className="text-2xl font-black leading-none flex items-center justify-center tracking-tighter">
+                {importanceConfig.icon}
+              </span>
+            </button>
+          </div>
         </div>
 
-        {isDDLUrgent && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-[0.07] pointer-events-none">
-            <span className="text-[120px] font-black tracking-tighter">
-              NOW
-            </span>
+        {/* 3. 底部白色内容区 */}
+        <div className="bg-white px-5 pb-4 pt-9 shrink-0">
+          <div className="flex gap-3 items-start">
+            <div className="mt-0.5 shrink-0 p-1.5 bg-gray-50 rounded-full">
+              <Clock className="w-4 h-4 text-gray-500" />
+            </div>
+            <div className="flex-1">
+              {/* 内容为空时不显示 */}
+              {task.content && (
+                <h3 className="text-gray-800 font-medium text-sm leading-relaxed mb-1 line-clamp-2">
+                  {task.content}
+                </h3>
+              )}
+              <div className="inline-block mt-0.5 px-2 py-0.5 bg-gray-100 text-gray-600 rounded-md text-[10px] font-bold uppercase tracking-wide">
+                {formatTimeLeft(task)}
+              </div>
+            </div>
           </div>
-        )}
-
-        <div className="relative z-10 flex justify-between items-start mb-6">
-          <span className="bg-white/20 backdrop-blur-md px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow-sm">
-            {formatTimeLeft(task)}
-          </span>
-
-          <div className="bg-white/20 backdrop-blur-md w-12 h-12 rounded-full flex items-center justify-center text-2xl shadow-inner border border-white/10">
-            {IMPORTANCE_CONFIG[task.importanceLevel - 1].icon}
-          </div>
-        </div>
-
-        <div className="relative z-10 mt-auto">
-          <div className="mb-3 opacity-90 min-h-[24px]">
-            <p className="text-sm font-medium line-clamp-2">{task.content}</p>
-          </div>
-          <h2 className="text-4xl font-black leading-[0.95] tracking-tight drop-shadow-sm">
-            {task.title}
-          </h2>
         </div>
       </div>
     );
   };
 
-  // --- 视图：编辑器 (重构) ---
+  // --- 视图：编辑器 (保持不变) ---
   if (view === "editor") {
     return (
-      <div className="min-h-screen bg-white flex flex-col animate-in slide-in-from-bottom-10 duration-200">
-        <div className="flex items-center justify-between p-4 border-b">
+      <div className="min-h-screen bg-white flex flex-col animate-in slide-in-from-bottom-8 duration-300 relative">
+        <div className="flex items-center justify-between p-6 relative z-10">
           <button
-            onClick={() => setView("dashboard")}
-            className="p-2 -ml-2 rounded-full hover:bg-gray-100"
+            onClick={goBack}
+            className="w-10 h-10 bg-gray-50 border border-gray-100 rounded-full flex items-center justify-center hover:bg-gray-100 active:scale-90 transition-all"
           >
-            <ArrowLeft className="w-6 h-6 text-gray-600" />
+            <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
-          <span className="font-bold text-gray-800">
-            {editingTask.id ? "编辑" : "新建"}
-          </span>
-          {editingTask.id ? (
+          {editingTask.id && (
             <button
               onClick={() => {
-                if (window.confirm("直接删除而不保存？")) {
-                  setTasks((prev) =>
-                    prev.filter((t) => t.id !== editingTask.id)
-                  );
-                  setView("dashboard");
-                }
+                triggerHaptic([20]);
+                setTasks((prev) => prev.filter((t) => t.id !== editingTask.id));
+                goBack();
               }}
-              className="p-2 text-rose-500"
+              className="w-10 h-10 bg-rose-50 border border-rose-100 rounded-full flex items-center justify-center text-rose-500 hover:bg-rose-100 active:scale-90 transition-all"
             >
               <Trash2 className="w-5 h-5" />
             </button>
-          ) : (
-            <div className="w-9" />
           )}
         </div>
 
-        <div className="flex-1 p-6 overflow-y-auto">
+        <div className="flex-1 px-8 overflow-y-auto relative z-10">
           <input
             autoFocus={!editingTask.id}
             type="text"
-            placeholder="要做什么？"
+            placeholder="Focus on..."
             value={editingTask.title}
             onChange={(e) =>
               setEditingTask({ ...editingTask, title: e.target.value })
             }
-            className="w-full text-2xl font-bold mb-6 outline-none placeholder-gray-300 bg-transparent"
+            className="w-full text-4xl font-black mb-8 outline-none placeholder-gray-200 bg-transparent text-gray-900 leading-tight"
           />
 
-          <div className="space-y-6 mb-8">
-            {/* 时间设置区域：DDL vs Everyday */}
-            <div className="bg-gray-50 p-4 rounded-xl">
-              <div className="flex items-center justify-between mb-4">
-                <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
-                  <Repeat className="w-4 h-4" /> 每日任务
-                </label>
-                <div
-                  onClick={() =>
-                    setEditingTask((prev) => ({
-                      ...prev,
-                      isEveryday: !prev.isEveryday,
-                    }))
-                  }
-                  className={`w-12 h-6 rounded-full p-1 cursor-pointer transition-colors duration-300 ${
-                    editingTask.isEveryday ? "bg-emerald-500" : "bg-gray-300"
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-300 ${
-                      editingTask.isEveryday ? "translate-x-6" : ""
-                    }`}
-                  />
-                </div>
-              </div>
+          <div className="space-y-8">
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => {
+                  triggerHaptic();
+                  setEditingTask((p) => ({ ...p, isEveryday: !p.isEveryday }));
+                }}
+                className={`px-4 py-2 rounded-full font-bold text-sm transition-all border ${
+                  editingTask.isEveryday
+                    ? "bg-emerald-100 text-emerald-700 border-emerald-100"
+                    : "bg-white text-gray-400 border-gray-200"
+                }`}
+              >
+                {editingTask.isEveryday ? "Everyday" : "One-time"}
+              </button>
 
               {!editingTask.isEveryday && (
-                <div className="animate-in fade-in duration-300">
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-2">
-                    <CalendarDays className="w-4 h-4" /> 截止日期 (DDL)
-                  </label>
+                <>
                   <input
                     type="date"
                     value={editingTask.ddl}
                     onChange={(e) =>
                       setEditingTask({ ...editingTask, ddl: e.target.value })
                     }
-                    className="w-full p-3 bg-white rounded-lg border border-gray-200 font-bold text-gray-800 outline-none focus:ring-2 focus:ring-black"
+                    className="px-4 py-2 rounded-full font-bold text-sm bg-gray-50 text-gray-700 border-none outline-none"
                   />
-                  <p className="text-xs text-gray-400 mt-2">
-                    * 剩余1天以内显示 DDL 水印
-                  </p>
-                </div>
-              )}
-              {editingTask.isEveryday && (
-                <p className="text-xs text-emerald-600 animate-in fade-in">
-                  * 每日任务完成后，明天会自动再次出现。
-                </p>
-              )}
-            </div>
-
-            {/* 重要程度 */}
-            <div>
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-3">
-                <Star className="w-4 h-4" /> 重要程度
-              </label>
-              <div className="grid grid-cols-3 gap-3">
-                {IMPORTANCE_CONFIG.map((level) => (
-                  <button
-                    key={level.value}
-                    onClick={() =>
-                      setEditingTask({
-                        ...editingTask,
-                        importanceLevel: level.value,
-                      })
-                    }
-                    className={`
-                      py-4 rounded-xl text-sm font-bold transition-all border flex flex-col items-center gap-1
-                      ${
-                        editingTask.importanceLevel === level.value
-                          ? "border-transparent bg-gray-900 text-white shadow-lg transform scale-105"
-                          : "border-gray-100 bg-white text-gray-400"
+                  <div className="flex items-center bg-gray-50 rounded-full px-4 py-2 gap-2 border border-transparent focus-within:border-gray-200 transition-colors">
+                    <Clock size={16} className="text-gray-400" />
+                    <input
+                      type="time"
+                      value={editingTask.time || ""}
+                      onChange={(e) =>
+                        setEditingTask({ ...editingTask, time: e.target.value })
                       }
-                    `}
-                  >
-                    <span className="text-2xl mb-1">{level.icon}</span>
-                    {level.label}
-                  </button>
-                ))}
-              </div>
+                      className="bg-transparent text-sm font-bold text-gray-700 outline-none w-20"
+                    />
+                  </div>
+                </>
+              )}
             </div>
-          </div>
 
-          <textarea
-            placeholder="备注..."
-            value={editingTask.content}
-            onChange={(e) =>
-              setEditingTask({ ...editingTask, content: e.target.value })
-            }
-            className="w-full h-40 resize-none text-base outline-none placeholder-gray-300 leading-relaxed p-4 bg-gray-50 rounded-xl"
-          />
+            <div className="grid grid-cols-3 gap-4">
+              {IMPORTANCE_CONFIG.map((level) => (
+                <button
+                  key={level.value}
+                  onClick={() => {
+                    triggerHaptic();
+                    setEditingTask({
+                      ...editingTask,
+                      importanceLevel: level.value,
+                    });
+                  }}
+                  className={`
+                    h-24 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all border-2
+                    ${
+                      editingTask.importanceLevel === level.value
+                        ? "border-black bg-black text-white"
+                        : "border-transparent bg-gray-50 text-gray-400"
+                    }
+                  `}
+                >
+                  <span
+                    className={`text-2xl ${getLevelColorClass(level.value)}`}
+                  >
+                    {level.icon}
+                  </span>
+                  <span className="text-xs font-bold">{level.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <textarea
+              placeholder="添加备注..."
+              value={editingTask.content}
+              onChange={(e) =>
+                setEditingTask({ ...editingTask, content: e.target.value })
+              }
+              className="w-full h-32 resize-none text-lg outline-none placeholder-gray-300 bg-transparent text-gray-600"
+            />
+          </div>
         </div>
 
-        <div className="p-4 border-t bg-white safe-area-pb">
+        <div className="p-6">
           <button
             onClick={() => handleSave(editingTask)}
-            className="w-full bg-black text-white py-4 rounded-xl font-bold text-lg shadow-xl active:scale-95 transition-transform flex items-center justify-center gap-2"
+            className="w-full bg-black text-white h-16 rounded-[2rem] font-bold text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2"
           >
-            <CheckCircle2 className="w-5 h-5" />
-            保存
+            保存事项
           </button>
         </div>
       </div>
     );
   }
 
-  // --- 视图：历史记录 ---
+  // --- 视图：历史记录 (保持不变) ---
   if (view === "history") {
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col animate-in slide-in-from-right-10 duration-200">
         <div className="flex items-center justify-between p-4 bg-white shadow-sm z-10">
           <button
-            onClick={() => setView("dashboard")}
+            onClick={goBack}
             className="p-2 -ml-2 rounded-full hover:bg-gray-100"
           >
             <ArrowLeft className="w-6 h-6 text-gray-600" />
@@ -610,12 +775,11 @@ export default function SmartReminderApp() {
           </span>
           <div className="w-9" />
         </div>
-
         <div className="flex-1 p-4 overflow-y-auto">
           {history.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 opacity-40 text-sm">
               <History className="w-12 h-12 mb-2 text-gray-300" />
-              暂无完成记录
+              空空如也
             </div>
           ) : (
             <div className="space-y-3">
@@ -660,13 +824,22 @@ export default function SmartReminderApp() {
             </div>
           )}
         </div>
+
+        {toast && (
+          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-top-4 fade-in duration-300">
+            <div className="bg-[#1e293b] text-white px-6 py-3 rounded-xl shadow-xl text-sm font-bold flex items-center gap-2 border border-white/10">
+              <CheckCircle2 className="w-4 h-4 text-green-400" />
+              {toast}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
-  // --- 主界面 (Dashboard) ---
+  // --- 主界面 ---
   return (
-    <div className="min-h-screen bg-white text-gray-900 pb-24 overflow-x-hidden">
+    <div className="min-h-screen bg-gray-100 text-gray-900 pb-24 overflow-x-hidden relative font-sans">
       <style>{`
         @keyframes shake {
           0%, 100% { transform: translateX(0); }
@@ -680,41 +853,102 @@ export default function SmartReminderApp() {
         }
       `}</style>
 
-      <div className="px-5 pt-10 pb-4 flex justify-between items-end">
+      {toast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-top-4 fade-in duration-300">
+          <div className="bg-[#1e293b] text-white px-6 py-3 rounded-xl shadow-xl text-sm font-bold flex items-center gap-2 border border-white/10">
+            <Star className="w-4 h-4 text-yellow-400 fill-yellow-400" />
+            {toast}
+          </div>
+        </div>
+      )}
+
+      {/* 顶部导航栏 (修改后) */}
+      <div className="px-5 pt-10 pb-6 flex justify-between items-center relative z-10">
+        {/* 左侧：标题 */}
         <h1 className="text-2xl font-black tracking-tight text-gray-900 flex items-center gap-2">
           FOCUS{" "}
           <span className="bg-black text-white px-2 text-sm rounded leading-6">
             NOW
           </span>
         </h1>
-        <button
-          onClick={() => setView("history")}
-          className="p-2 text-gray-400 hover:text-gray-900 transition-colors"
-        >
-          <History className="w-6 h-6" />
-        </button>
+
+        {/* 右侧：排序按钮组 + 历史记录 (编组，防止重叠) */}
+        <div className="flex items-center gap-3">
+          {/* 排序按钮 */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleSortChange("time")}
+              className={`
+                    flex items-center justify-center w-9 h-9 rounded-full transition-all border border-gray-200 shadow-sm
+                    ${
+                      sortMode === "time"
+                        ? "bg-black text-white"
+                        : "bg-white text-gray-400 hover:text-gray-600"
+                    }
+                    `}
+            >
+              <Clock size={16} />
+            </button>
+            <button
+              onClick={() => handleSortChange("importance")}
+              className={`
+                    flex items-center justify-center w-9 h-9 rounded-full transition-all border border-gray-200 shadow-sm
+                    ${
+                      sortMode === "importance"
+                        ? "bg-black text-white"
+                        : "bg-white text-gray-400 hover:text-gray-600"
+                    }
+                    `}
+            >
+              <Star size={16} />
+            </button>
+          </div>
+
+          {/* 历史记录按钮 */}
+          <button
+            onClick={() => navigateTo("history")}
+            className="p-2 text-gray-400 hover:text-gray-900 transition-colors -mr-2"
+          >
+            <History className="w-6 h-6" />
+          </button>
+        </div>
       </div>
 
-      <div className="px-5">
-        {!topTask && otherTasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 opacity-40">
-            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-4">
-              <Calendar className="w-8 h-8 text-gray-400" />
+      {/* 内容区域 */}
+      <div
+        className={`
+          px-5 relative z-10 transition-all duration-500 ease-in-out transform
+          ${
+            isVisible
+              ? "opacity-100 translate-y-0 scale-100 blur-0"
+              : "opacity-0 -translate-y-12 scale-95 blur-sm"
+          }
+        `}
+      >
+        {!heroTasks.length && !gridTasks.length ? (
+          <div className="flex flex-col items-center justify-center py-24 opacity-30">
+            <div className="w-24 h-24 bg-gray-200 rounded-full flex items-center justify-center mb-4">
+              <Calendar className="w-10 h-10 text-gray-400" />
             </div>
-            <p>暂无事项，享受当下</p>
+            <p className="font-bold text-gray-400">人生如逆旅 我亦是行人</p>
           </div>
         ) : (
           <>
-            {topTask && (
-              <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <HeroCard task={topTask} />
+            {/* Hero Tasks */}
+            {heroTasks.map((task) => (
+              <div
+                key={task.id}
+                className="animate-in fade-in slide-in-from-bottom-4 duration-500"
+              >
+                <HeroCard task={task} />
               </div>
-            )}
+            ))}
 
-            {otherTasks.length > 0 && (
-              <div className="mt-6 animate-in slide-in-from-bottom-8 duration-700 delay-100">
-                <div className="grid grid-cols-2 gap-3">
-                  {otherTasks.map((task) => (
+            {/* Grid Tasks */}
+            {gridTasks.length > 0 && (
+              <div className="mt-2 animate-in slide-in-from-bottom-8 duration-700 delay-100">
+                <div className="grid grid-cols-2 gap-4">
+                  {gridTasks.map((task) => (
                     <GridCard key={task.id} task={task} />
                   ))}
                 </div>
@@ -735,9 +969,9 @@ export default function SmartReminderApp() {
         <div className="fixed bottom-8 left-6 z-10">
           <button
             onClick={() => installPrompt.prompt()}
-            className="bg-white border shadow-lg px-4 py-2 rounded-full text-xs font-bold text-gray-600"
+            className="bg-white border border-gray-200 shadow-lg px-4 py-2 rounded-full text-xs font-bold text-gray-600"
           >
-            ↓ 安装
+            ↓ 安装应用
           </button>
         </div>
       )}
